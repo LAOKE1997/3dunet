@@ -1,0 +1,116 @@
+# use a fixed random seed to guarantee that when you run the code twice you will get the same outcome
+manual_seed: 0
+# model configuration
+model:
+  # model class, e.g. UNet3D
+  # TODO: up to you to impelement the model
+  name: UNet3D
+  # number of input channels to the model
+  in_channels: 1
+  # number of output channels
+  out_channels: 1
+  # determines the order of operators in a single layer (gcr - GroupNorm+Conv3d+ReLU)
+  layer_order: gcr
+  # feature maps scale factor
+  f_maps: 16
+  # number of groups in the groupnorm
+  num_groups: 8
+  # if True applies the final normalization layer (sigmoid or softmax), otherwise the networks returns the output from the final convolution layer; use False for regression problems, e.g. de-noising
+  is_segmentation: false
+# trainer configuration
+trainer:
+  # path to the checkpoint directory
+  checkpoint_dir: 3dunet
+  # path to latest checkpoint; if provided the training will be resumed from that checkpoint
+  resume: null
+  # how many iterations between validations
+  validate_after_iters: 100
+  # how many iterations between tensorboard logging
+  log_after_iters: 50
+  # max number of epochs
+  epochs: 100
+  # max number of iterations
+  iters: 100000
+  # model with higher eval score is considered better
+  eval_score_higher_is_better: true
+# optimizer configuration
+optimizer:
+  # initial learning rate
+  learning_rate: 0.0002
+  # weight decay
+  weight_decay: 0.00001
+# loss function configuration
+loss:
+  # loss function to be used during training
+  name: MSELoss
+  # a target value that is ignored and does not contribute to the input gradient
+  ignore_index: null
+# evaluation metric configuration
+eval_metric:
+  # peak signal to noise ration
+  # TODO: change for more appropriate metric
+  name: PSNR
+  # a target label that is ignored during metric evaluation
+  ignore_index: null
+# learning rate scheduler configuration
+lr_scheduler:
+  # reduce learning rate when evaluation metric plateaus
+  name: ReduceLROnPlateau
+  # use 'max' if eval_score_higher_is_better=True, 'min' otherwise
+  mode: max
+  # factor by which learning rate will be reduced
+  factor: 0.5
+  # number of *validation runs* with no improvement after which learning rate will be reduced
+  patience: 10
+# data loaders configuration
+loaders:
+  # class of the HDF5 dataset, currently StandardHDF5Dataset and LazyHDF5Dataset are supported.
+  # When using LazyHDF5Dataset make sure to set `num_workers = 1`, due to a bug in h5py which corrupts the data
+  # when reading from multiple threads.
+  dataset: EGFPDataset
+  # batch dimension; if number of GPUs is N > 1, then a batch_size of N * batch_size will automatically be taken for DataParallel
+  batch_size: 1
+  # how many subprocesses to use for data loading
+  num_workers: 4
+  # path to the raw data within the H5
+  internal_path: exported_data
+  # configuration of the train loader
+  train:
+    # absolute paths to the training datasets; if a given path is a directory all H5 files ('*.h5', '*.hdf', '*.hdf5', '*.hd5')
+    # inside this this directory will be included as well (non-recursively)
+    file_paths:
+        #TODO: provide your list of files
+        - '../resources/random3D.h5'
+
+    # data transformations/augmentations
+    transformer:
+      raw:
+        # apply (x - mean) / std
+        - name: Standardize
+        - name: ToTensor
+          expand_dims: true
+      label:
+         # apply (x - mean) / std
+        - name: Standardize
+        - name: ToTensor
+          expand_dims: true
+
+  # configuration of the validation loaders
+  val:
+    # paths to the validation datasets; if a given path is a directory all H5 files ('*.h5', '*.hdf', '*.hdf5', '*.hd5')
+    # inside this this directory will be included as well (non-recursively)
+    file_paths:
+        # TODO: fill in the validation paths
+        - '../resources/random3D_copy.h5'
+
+    transformer:
+      raw:
+        # apply (x - mean) / std
+        - name: Standardize
+        - name: ToTensor
+          expand_dims: true
+      label:
+         # apply (x - mean) / std
+        - name: Standardize
+        - name: ToTensor
+          expand_dims: true

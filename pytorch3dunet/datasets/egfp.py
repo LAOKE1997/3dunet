@@ -8,7 +8,7 @@ from pytorch3dunet.datasets.utils import ConfigDataset
 
 
 class EGFPDataset(ConfigDataset):
-    def __init__(self, file_path, internal_path, z_slice_count, target_slice_index):
+    def __init__(self, file_path, internal_path, z_slice_count, target_slice_index, **kwargs):
         with h5py.File(file_path, 'r') as f:
             self.raw = f[internal_path][...]
 
