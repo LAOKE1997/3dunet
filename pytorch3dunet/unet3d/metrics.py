@@ -5,9 +5,17 @@ import time
 import hdbscan
 import numpy as np
 import torch
+import skimage
+from skimage import feature
 from skimage import measure
-from skimage.metrics import adapted_rand_error, peak_signal_noise_ratio
+from skimage.filters import threshold_otsu
+from skimage.metrics import adapted_rand_error, peak_signal_noise_ratio, mean_squared_error
+from skimage.metrics import normalized_root_mse
+from skimage.segmentation import watershed
+
 from sklearn.cluster import MeanShift
+from scipy.spatial import distance
+from scipy import ndimage
 
 from pytorch3dunet.unet3d.losses import compute_per_channel_dice
 from pytorch3dunet.unet3d.seg_metrics import AveragePrecision, Accuracy
@@ -107,6 +115,418 @@ class MeanIoU:
         """
         return torch.sum(prediction & target).float() / torch.clamp(torch.sum(prediction | target).float(), min=1e-8)
 
+class PeakMatching:
+    """
+    Metric for local peak - maxima/ minima in a specified radius region
+    """
+
+    def __init__(self, **kwargs):
+        pass
+
+    def __call__(self, input, target):
+        """
+        :input: The predictions from the network (BS*C*D*H*W)
+        :target: The ground truth passed to the network (BS*C*D*H*W)
+        :return: Number of matched peaks
+        """
+
+        # look for local max within fixed range between input and target
+
+        # Get input and predictions in required format
+        input, target = convert_to_numpy(input, target)
+        
+        # pass the original gt coordinates here
+        #original_gt = #
+
+        # Take the peaks from the predictions
+        local_max = skimage.feature.peak_local_max(input[0][0], min_distance=4)
+
+        # Take the foreground pixels from ground truth
+        foreground = np.where(target[0][0]==1.0)
+        foreground_coords = []
+
+        for idx, val in enumerate(foreground[0]):
+            foreground_coords.append([foreground[0][idx], foreground[1][idx], foreground[2][idx]])
+
+        eval_dict = {}
+
+        # Matching procedure
+        for coord in local_max:
+            z, y, x = coord[0], coord[1], coord[2]
+            eval_dict[(z,y,x)] = {}
+
+            for coord in foreground_coords:
+                gt_z, gt_y, gt_x = coord[0], coord[1], coord[2]
+
+                # Taking anisotropy into account
+                std_euc = distance.seuclidean([z,y,x], [gt_z, gt_y, gt_x], [3.0,1.3,1.3])
+
+                # Keeping a threshold for matching
+                if std_euc <=8.0:
+                    eval_dict[(z,y,x)][gt_z, gt_y, gt_x] = std_euc
+
+        n_count = 0
+        for k, v in eval_dict.items():
+            if v != {}:
+                #vsorted = {k2: v2 for k2, v2 in sorted(v.items(), key=lambda item: item[1])}
+
+                n_count += 1
+                #print(k, dict(itertools.islice(vsorted.items(), 1)))
+        
+        print(n_count)
+        return torch.tensor(n_count)
+
+
+class Thresh_IoU:
+    """
+    Computes IoU for each class separately and then averages over all classes.
+    """
+
+    def __init__(self, skip_channels=(), ignore_index=None, **kwargs):
+        """
+        :param skip_channels: list/tuple of channels to be ignored from the IoU computation
+        :param ignore_index: id of the label to be ignored from IoU computation
+        """
+        self.ignore_index = ignore_index
+        self.skip_channels = skip_channels
+
+    def __call__(self, input, target):
+        """
+        :param input: 5D probability maps torch float tensor (NxCxDxHxW)
+        :param target: 4D or 5D ground truth torch tensor. 4D (NxDxHxW) tensor will be expanded to 5D as one-hot
+        :return: intersection over union averaged over all channels
+        """
+        assert input.dim() == 5
+
+        predictions, target = convert_to_numpy(input, target)
+        predictions = predictions[0]
+
+        # global otsu threshold on the predictions
+        global_thresh = threshold_otsu(predictions)
+
+        low_intensity_region = np.where(predictions < global_thresh)
+
+        predictions = np.array(predictions)
+        predictions[low_intensity_region] = 0
+        predictions = np.expand_dims(predictions, axis=0)
+
+        predictions = torch.tensor(predictions)
+
+        target = torch.tensor(target)
+
+        n_classes = input.size()[1]
+
+        if target.dim() == 4:
+            target = expand_as_one_hot(target, C=n_classes, ignore_index=self.ignore_index)
+
+        assert predictions.size() == target.size()
+
+        per_batch_iou = []
+        for _input, _target in zip(predictions, target):
+            binary_prediction = self._binarize_predictions(_input, n_classes)
+
+            if self.ignore_index is not None:
+                # zero out ignore_index
+                mask = _target == self.ignore_index
+                binary_prediction[mask] = 0
+                _target[mask] = 0
+
+            # convert to uint8 just in case
+            binary_prediction = binary_prediction.byte()
+            _target = _target.byte()
+
+            per_channel_iou = []
+            for c in range(n_classes):
+                if c in self.skip_channels:
+                    continue
+
+                per_channel_iou.append(self._jaccard_index(binary_prediction[c], _target[c]))
+
+            assert per_channel_iou, "All channels were ignored from the computation"
+            mean_iou = torch.mean(torch.tensor(per_channel_iou))
+            per_batch_iou.append(mean_iou)
+
+        return torch.mean(torch.tensor(per_batch_iou))
+
+    def _binarize_predictions(self, input, n_classes):
+        """
+        Puts 1 for the class/channel with the highest probability and 0 in other channels. Returns byte tensor of the
+        same size as the input tensor.
+        """
+        if n_classes == 1:
+            # for single channel input just threshold the probability map
+            result = input > 0.5
+            return result.long()
+
+        _, max_index = torch.max(input, dim=0, keepdim=True)
+        return torch.zeros_like(input, dtype=torch.uint8).scatter_(0, max_index, 1)
+
+    def _jaccard_index(self, prediction, target):
+        """
+        Computes IoU for a given target and prediction tensors
+        """
+        return torch.sum(prediction & target).float() / torch.clamp(torch.sum(prediction | target).float(), min=1e-8)
+
+
+class Peaks_IoU:
+    """
+    Computes IoU for each class separately and then averages over all classes.
+    """
+
+    def __init__(self, skip_channels=(), ignore_index=None, **kwargs):
+        """
+        :param skip_channels: list/tuple of channels to be ignored from the IoU computation
+        :param ignore_index: id of the label to be ignored from IoU computation
+        """
+        self.ignore_index = ignore_index
+        self.skip_channels = skip_channels
+
+    def __call__(self, input, target):
+        """
+        :param input: 5D probability maps torch float tensor (NxCxDxHxW)
+        :param target: 4D or 5D ground truth torch tensor. 4D (NxDxHxW) tensor will be expanded to 5D as one-hot
+        :return: intersection over union averaged over all channels
+        """
+        assert input.dim() == 5
+
+        predictions, target = convert_to_numpy(input, target)
+        predictions = predictions[0]
+
+        # global otsu threshold on the predictions
+        global_thresh = threshold_otsu(predictions)
+
+        # define the foreground based on threshold
+        foreground = predictions > global_thresh
+
+        # get the local peaks from the predictions
+        local_max = skimage.feature.peak_local_max(predictions[0], min_distance=5)
+
+        # prepare the vol with peaks
+        local_peaks_vol = np.zeros((1, 48, 128, 128))
+
+        for coordinate in local_max:
+            local_peaks_vol[0][coordinate[0], coordinate[1], coordinate[2]] = 1.0
+
+        # dilate the peaks
+        inv_local_peaks_vol = np.logical_not(local_peaks_vol)
+
+        # get distance transform
+        local_peaks_edt = ndimage.distance_transform_edt(inv_local_peaks_vol)
+
+        # threshold the edt and invert back: fg as 1, bg as 0
+        spherical_peaks = local_peaks_edt > 3
+        spherical_peaks = np.logical_not(spherical_peaks).astype(np.float64)
+
+        # get the outliers based on threshold and set zero
+        outliers = np.where(spherical_peaks != foreground)
+        spherical_peaks[outliers] = 0
+
+        spherical_peaks = np.expand_dims(spherical_peaks, axis=0)
+        # print(spherical_peaks.shape)
+        # print(np.min(spherical_peaks))
+        # print(np.max(spherical_peaks))
+        # print(len(np.where(spherical_peaks==1.0)[0]))
+
+        # spherical_peaks = torch.tensor(spherical_peaks)
+
+        # spherical_peaks.to('cuda')
+
+        spherical_peaks = torch.tensor(spherical_peaks)
+        target = torch.tensor(target)
+
+        n_classes = input.size()[1]
+
+        if target.dim() == 4:
+            target = expand_as_one_hot(target, C=n_classes, ignore_index=self.ignore_index)
+
+        assert spherical_peaks.size() == target.size()
+
+        per_batch_iou = []
+        for _input, _target in zip(spherical_peaks, target):
+            binary_prediction = self._binarize_predictions(_input, n_classes)
+
+            if self.ignore_index is not None:
+                # zero out ignore_index
+                mask = _target == self.ignore_index
+                binary_prediction[mask] = 0
+                _target[mask] = 0
+
+            # convert to uint8 just in case
+            binary_prediction = binary_prediction.byte()
+            _target = _target.byte()
+
+            per_channel_iou = []
+            for c in range(n_classes):
+                if c in self.skip_channels:
+                    continue
+
+                per_channel_iou.append(self._jaccard_index(binary_prediction[c], _target[c]))
+
+            assert per_channel_iou, "All channels were ignored from the computation"
+            mean_iou = torch.mean(torch.tensor(per_channel_iou))
+            per_batch_iou.append(mean_iou)
+
+        return torch.mean(torch.tensor(per_batch_iou))
+
+
+    def _binarize_predictions(self, input, n_classes):
+        """
+        Puts 1 for the class/channel with the highest probability and 0 in other channels. Returns byte tensor of the
+        same size as the input tensor.
+        """
+        if n_classes == 1:
+            # for single channel input just threshold the probability map
+            result = input > 0.5
+            return result.long()
+
+        _, max_index = torch.max(input, dim=0, keepdim=True)
+        return torch.zeros_like(input, dtype=torch.uint8).scatter_(0, max_index, 1)
+
+    def _jaccard_index(self, prediction, target):
+        """
+        Computes IoU for a given target and prediction tensors
+        """
+        return torch.sum(prediction & target).float() / torch.clamp(torch.sum(prediction | target).float(), min=1e-8)
+
+
+class instance_count:
+
+    def __init__(self, **kwargs):
+        pass
+
+    def precision(self, tp_count, fp_count):
+        return tp_count / (tp_count + fp_count)
+
+    def recall(self, tp_count, fn_count):
+        return tp_count / (tp_count + fn_count)
+
+    def __call__(self, input, target):
+        predictions, target = convert_to_numpy(input, target)
+
+        predictions = predictions[0]
+        target = target[0]
+
+        global_thresh = threshold_otsu(predictions[0])
+
+        foreground = predictions > global_thresh
+
+        local_max = skimage.feature.peak_local_max(predictions[0], min_distance=3)
+
+        temp_max = np.zeros((1,48,128,128))
+
+        for i, each in enumerate(local_max):
+            temp_max[0][each[0], each[1], each[2]] = i+1
+
+        inv_temp_max = np.logical_not(temp_max)
+        dist_tr = ndimage.distance_transform_edt(inv_temp_max)
+
+        # Thresh val.
+        thresh_tr = dist_tr > 2
+
+        thresh_temp = np.logical_not(thresh_tr).astype(np.float64)
+
+        extra = np.where(thresh_temp != foreground)
+
+        thresh_temp[extra] = 0
+
+        watershed_output = watershed(thresh_temp, temp_max, mask=thresh_temp).astype(np.uint16)
+
+        wshed_peaks = []
+        wshed = np.where(watershed_output[0]!=0)
+
+
+        for wid, wval in enumerate(wshed[0]):
+            wshed_peaks.append([wshed[0][wid], wshed[1][wid], wshed[2][wid]])
+
+
+        intersection_peaks = []
+        for each in local_max:
+            z,y,x = each[0], each[1], each[2]
+            for ws in wshed_peaks:
+                wsz, wsy, wsx = ws[0], ws[1], ws[2]
+                if z == wsz and y == wsy and x == wsx:
+                    intersection_peaks.append(ws)
+
+        gt_foreground = np.where(target[0]==1.0)
+        gt_coords = []
+
+        for idx, val in enumerate(gt_foreground[0]):
+            gt_coords.append([gt_foreground[0][idx], gt_foreground[1][idx], gt_foreground[2][idx]])
+
+        eval_dict = {}
+
+        for gtc in gt_coords:
+            gt_z, gt_y, gt_x = gtc[0], gtc[1], gtc[2]
+            eval_dict[(gt_z, gt_y, gt_x)] = {}
+
+            for a, peak in enumerate(intersection_peaks):
+                z, y, x = peak[0], peak[1], peak[2]
+
+                std_euc = distance.seuclidean([gt_z, gt_y, gt_x], [z,y,x], [3.0,1.3,1.3])
+
+                if std_euc <= 6.0:
+                    #instance_label = watershed_output[0][wshed_peaks[a][0]][wshed_peaks[a][1]][wshed_peaks[a][2]]
+                    #eval_dict[gt_z, gt_y, gt_x][(z,y,x)] = {instance_label, std_euc}
+                    eval_dict[gt_z, gt_y, gt_x][(z,y,x)] = std_euc
+
+        tp_count = 0
+        fn_count = 0
+
+        for k1, v1 in eval_dict.items():
+            if v1 != {}:
+                tp_count += 1
+                #v1sorted = {k:v for k,v in sorted(v1.items(), key=lambda item: item[1])}
+                #print(k1, v1sorted)
+            else:
+                fn_count += 1
+
+        print('Total GT peaks: 79')
+        print('Prediction peaks after thresholding: ' + str(len(intersection_peaks)))
+        print('Matched GT and peaks (TP): ' +  str(tp_count))
+
+        # fn count -> 
+
+        print('No prediction peak for GT (FN): ' + str(fn_count))
+        # for k, v in eval_dict.items():
+        #   print(k, v)
+
+        eval_dict = {}
+
+        fp_count = 0
+        tp_count = 0
+
+        for a, peak in enumerate(intersection_peaks):
+            z, y, x = peak[0], peak[1], peak[2]
+            eval_dict[(z, y, x)] = {}
+
+            for gtc in gt_coords:
+                gt_z, gt_y, gt_x = gtc[0], gtc[1], gtc[2]
+
+                std_euc = distance.seuclidean([z,y,x], [gt_z, gt_y, gt_x], [3.0,1.3,1.3])
+
+                if std_euc <= 6.0:
+                    #instance_label = watershed_output[0][wshed_peaks[a][0]][wshed_peaks[a][1]][wshed_peaks[a][2]]
+                    #eval_dict[gt_z, gt_y, gt_x][(z,y,x)] = {instance_label, std_euc}
+                    eval_dict[z, y, x][(gt_z,gt_y,gt_x)] = std_euc
+
+        for k1, v1 in eval_dict.items():
+            if v1 != {}:
+                tp_count += 1
+                #v1sorted = {k:v for k,v in sorted(v1.items(), key=lambda item: item[1])}
+                #print(k1, v1sorted)
+            else:
+                fp_count += 1
+                #print(k1)
+
+        #print('' + tp_count)
+        print('No GT for a peak (FP): ' + str(fp_count))
+
+        precision_val = self.precision(tp_count, fp_count)
+        recall_val = self.recall(tp_count, fn_count)
+
+        F1_score = 2 * precision_val * recall_val / (precision_val + recall_val)
+
+        return torch.tensor(F1_score)
 
 class AdaptedRandError:
     """
@@ -471,6 +891,29 @@ class PSNR:
         input, target = convert_to_numpy(input, target)
         return peak_signal_noise_ratio(target, input)
 
+class MSE:
+    """
+    Compute the Mean Squared Error (Regression tasks).
+    """
+
+    def __init__(self, **kwargs):
+        pass
+
+    def __call__(self, input, target):
+        input, target = convert_to_numpy(input, target)
+        return mean_squared_error(target, input)
+
+class RMSE:
+    """
+    Compute the Root Mean Squared Error (Regression tasks).
+    """
+
+    def __init__(self, **kwargs):
+        pass
+
+    def __call__(self, input, target):
+        input, target = convert_to_numpy(input, target)
+        return normalized_root_mse(target, input)
 
 class WithinAngleThreshold:
     """

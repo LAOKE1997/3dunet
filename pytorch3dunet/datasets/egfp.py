@@ -5,6 +5,9 @@ import h5py
 import numpy as np
 
 from pytorch3dunet.datasets.utils import ConfigDataset
+from pytorch3dunet.unet3d.utils import get_logger
+
+logger = get_logger('EGFPDataset')
 
 
 class EGFPDataset(ConfigDataset):
@@ -54,16 +57,15 @@ class EGFPDataset(ConfigDataset):
 
         return [cls(file_path, internal_path, z_slice_count, target_slice_index) for file_path in file_paths]
 
+# if __name__ == '__main__':
+#     with tempfile.TemporaryDirectory() as d:
+#         file_path = os.path.join(d, 'test.h5')
+#         with h5py.File(file_path, 'w') as f:
+#             f.create_dataset('exported_data', data=np.random.rand(60, 100, 100, 1), compression='gzip')
 
-if __name__ == '__main__':
-    with tempfile.TemporaryDirectory() as d:
-        file_path = os.path.join(d, 'test.h5')
-        with h5py.File(file_path, 'w') as f:
-            f.create_dataset('exported_data', data=np.random.rand(60, 100, 100, 1), compression='gzip')
+#         ds = EGFPDataset(file_path, 'exported_data', 3, 0)
 
-        ds = EGFPDataset(file_path, 'exported_data', 3, 0)
+#         print('>> ds lenght: ', len(ds))
 
-        print('>> ds lenght: ', len(ds))
-
-        for input, target in ds:
-            print(f'input shape: {input.shape}, target shape: {target.shape}')
+#         for input, target in ds:
+#             print(f'input shape: {input.shape}, target shape: {target.shape}')

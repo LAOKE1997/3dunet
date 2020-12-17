@@ -2,10 +2,13 @@ import os
 
 import torch
 import torch.nn as nn
+from torch.nn import functional as F
 from tensorboardX import SummaryWriter
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from pytorch3dunet.unet3d.utils import get_logger
+from pytorch3dunet.unet3d.Smoothing import GaussianSmoothing
+
 from . import utils
 
 logger = get_logger('UNet3DTrainer')
@@ -13,7 +16,6 @@ logger = get_logger('UNet3DTrainer')
 
 class UNet3DTrainer:
     """3D UNet trainer.
-
     Args:
         model (Unet3D): UNet 3D model to be trained
         optimizer (nn.optim.Optimizer): optimizer used for training
@@ -151,10 +153,8 @@ class UNet3DTrainer:
 
     def train(self, train_loader):
         """Trains the model for 1 epoch.
-
         Args:
             train_loader (torch.utils.data.DataLoader): training data loader
-
         Returns:
             True if the training should be terminated immediately, False otherwise
         """
@@ -170,7 +170,11 @@ class UNet3DTrainer:
 
             input, target, weight = self._split_training_batch(t)
 
+            # output, loss, opshape, tarshape = self._forward_pass(input, target, weight)
             output, loss = self._forward_pass(input, target, weight)
+
+            #print(type(output))
+            #print(opshape, tarshape)
 
             train_losses.update(loss.item(), self._batch_size(input))
 
@@ -291,8 +295,10 @@ class UNet3DTrainer:
             input, target, weight = t
         return input, target, weight
 
+
     def _forward_pass(self, input, target, weight=None):
         # forward pass
+
         output = self.model(input)
 
         # compute the loss

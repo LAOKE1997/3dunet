@@ -1,10 +1,12 @@
 import glob
 import os
+import copy
 from itertools import chain
 from multiprocessing import Lock
 
 import h5py
 import numpy as np
+from scipy import ndimage
 
 import pytorch3dunet.augment.transforms as transforms
 from pytorch3dunet.datasets.utils import get_slice_builder, ConfigDataset, calculate_stats
@@ -69,6 +71,22 @@ class AbstractHDF5Dataset(ConfigDataset):
 
         input_file = self.create_h5_file(file_path, internal_paths)
 
+
+        # label dilation routine added here
+        ##### START #####
+
+        # self.label = input_file['label']
+        # self.inv_label = np.logical_not(self.label)
+
+        # self.label_dist_transform = ndimage.distance_transform_edt(self.inv_label)
+        # self.label_thresh_tr = self.label_dist_transform > 3
+
+        # self.label_thresh_tr = np.logical_not(self.label_thresh_tr).astype(np.float64)
+
+        # input_file['label'] = self.label_thresh_tr
+
+        ##### END #####
+
         self.raws = self.fetch_and_check(input_file, raw_internal_path)
 
         min_value, max_value, mean, std = self.ds_stats()
@@ -110,6 +128,26 @@ class AbstractHDF5Dataset(ConfigDataset):
                     padded_volumes.append(padded_volume)
 
                 self.raws = padded_volumes
+
+
+        self.dilation_list = copy.deepcopy(self.labels)
+        self.dilated_labels = []
+        for each_vol in self.dilation_list:
+            self.label_dilate = each_vol
+            self.inv_label = np.logical_not(self.label_dilate)
+            self.label_dist_transform = ndimage.distance_transform_edt(self.inv_label)
+            self.label_thresh_tr = self.label_dist_transform > 3
+
+            self.label_thresh_tr = np.logical_not(self.label_thresh_tr).astype(np.float64)
+            self.dilated_labels.append(self.label_thresh_tr)
+
+        if phase == 'train':
+            self.labels = self.dilated_labels
+
+        # print('self.labels\n')
+        # print(self.labels[0].shape)
+        #print(len(np.where(self.labels[0]!=0)[1]))
+        # print('\n')        
 
         # build slice indices for raw and label data sets
         slice_builder = get_slice_builder(self.raws, self.labels, self.weight_maps, slice_builder_config)
@@ -267,6 +305,10 @@ class StandardHDF5Dataset(AbstractHDF5Dataset):
     @staticmethod
     def fetch_datasets(input_file_h5, internal_paths):
         return [input_file_h5[internal_path][...] for internal_path in internal_paths]
+
+    # @staticmethod
+    # def dilate_labels(file_path, internal_paths):
+    #     return h5py.File(file_path, 'w')
 
 
 class LazyHDF5Dataset(AbstractHDF5Dataset):

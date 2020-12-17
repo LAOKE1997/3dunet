@@ -112,6 +112,7 @@ class StandardPredictor(_AbstractPredictor):
 
                 # wrap predictions into a list if there is only one output head from the network
                 if output_heads == 1:
+                    # take a tuple here
                     predictions = [predictions]
 
                 # for each output head

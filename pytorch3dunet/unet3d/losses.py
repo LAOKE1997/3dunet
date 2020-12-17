@@ -6,13 +6,13 @@ from torch.nn import MSELoss, SmoothL1Loss, L1Loss
 
 from pytorch3dunet.embeddings.contrastive_loss import ContrastiveLoss
 from pytorch3dunet.unet3d.utils import expand_as_one_hot
+from pytorch3dunet.unet3d.Smoothing import GaussianSmoothing
 
 
 def compute_per_channel_dice(input, target, epsilon=1e-6, weight=None):
     """
     Computes DiceCoefficient as defined in https://arxiv.org/abs/1606.04797 given  a multi channel input and target.
     Assumes the input is a normalized probability, e.g. a result of Sigmoid or Softmax function.
-
     Args:
          input (torch.Tensor): NxCxSpatial input tensor
          target (torch.Tensor): NxCxSpatial target tensor
@@ -126,6 +126,17 @@ class DiceLoss(_AbstractDiceLoss):
 
     def dice(self, input, target, weight):
         return compute_per_channel_dice(input, target, weight=self.weight)
+
+
+class GaussianDiceLoss(_AbstractDiceLoss):
+    def __init__(self, weight=None, sigmoid_normalization=True):
+        super().__init__(weight, sigmoid_normalization)
+        self.smoothing = GaussianSmoothing(1, 3, 1, 3).to('cuda')
+
+    def dice(self, input, target, weight):
+        g_input = self.smoothing(input)
+        g_target = self.smoothing(target)
+        return compute_per_channel_dice(g_input, g_target, weight=self.weight)
 
 
 class GeneralizedDiceLoss(_AbstractDiceLoss):
@@ -279,7 +290,6 @@ def square_angular_loss(input, target, weights=None):
     """
     Computes square angular loss between input and target directions.
     Makes sure that the input and target directions are normalized so that torch.acos would not produce NaNs.
-
     :param input: 5D input tensor (NCDHW)
     :param target: 5D target tensor (NCDHW)
     :param weights: 3D weight tensor in order to balance different instance sizes
@@ -350,8 +360,8 @@ def get_loss_criterion(config):
 
 
 SUPPORTED_LOSSES = ['BCEWithLogitsLoss', 'BCEDiceLoss', 'CrossEntropyLoss', 'WeightedCrossEntropyLoss',
-                    'PixelWiseCrossEntropyLoss', 'GeneralizedDiceLoss', 'DiceLoss', 'TagsAngularLoss', 'MSELoss',
-                    'SmoothL1Loss', 'L1Loss', 'WeightedSmoothL1Loss']
+                    'PixelWiseCrossEntropyLoss', 'GeneralizedDiceLoss', 'DiceLoss', 'GaussianDiceLoss',
+                    'TagsAngularLoss', 'MSELoss', 'SmoothL1Loss', 'L1Loss', 'WeightedSmoothL1Loss']
 
 
 def _create_loss(name, loss_config, weight, ignore_index, pos_weight):
@@ -377,6 +387,9 @@ def _create_loss(name, loss_config, weight, ignore_index, pos_weight):
     elif name == 'DiceLoss':
         sigmoid_normalization = loss_config.get('sigmoid_normalization', True)
         return DiceLoss(weight=weight, sigmoid_normalization=sigmoid_normalization)
+    elif name == 'GaussianDiceLoss':
+        sigmoid_normalization = loss_config.get('sigmoid_normalization', True)
+        return GaussianDiceLoss(weight=weight, sigmoid_normalization=sigmoid_normalization)
     elif name == 'TagsAngularLoss':
         tags_coefficients = loss_config['tags_coefficients']
         return TagsAngularLoss(tags_coefficients)

@@ -111,6 +111,8 @@ class Abstract3DUNet(nn.Module):
         else:
             # regression problem
             self.final_activation = None
+            # self.final_activation = nn.Tanh()
+            # self.final_activation = nn.Sigmoid()
 
     def forward(self, x):
         # encoder part
@@ -132,11 +134,18 @@ class Abstract3DUNet(nn.Module):
 
         x = self.final_conv(x)
 
+        # x_seg = copy.deepcopy(x)
+        # x_reg = copy.deepcopy(x)
+        #
+        # seg_activation = nn.Sigmoid()
+        # x_seg = seg_activation(x_seg)
+
         # apply final_activation (i.e. Sigmoid or Softmax) only during prediction. During training the network outputs
         # logits and it's up to the user to normalize it before visualising with tensorboard or computing validation metric
         if self.testing and self.final_activation is not None:
             x = self.final_activation(x)
 
+        # return x_seg, x_reg
         return x
 
 
